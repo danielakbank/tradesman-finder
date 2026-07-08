@@ -18,18 +18,36 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+# Google Places API (New) endpoints
 TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 PLACE_DETAILS_URL = "https://places.googleapis.com/v1/places/{place_id}"
 
+# Only request the fields we actually use — Places API (New) bills per field
 SEARCH_FIELD_MASK = "places.id,places.displayName"
 DETAILS_FIELD_MASK = (
     "displayName,formattedAddress,internationalPhoneNumber,"
     "nationalPhoneNumber,websiteUri,rating,userRatingCount,googleMapsUri"
 )
 
+# App limits
 MAX_RESULTS_CAP = 20
 DAILY_SEARCH_LIMIT = 30
 
+# UI text
+APP_TITLE = "Tradesman Finder"
+APP_TAGLINE = "Find trusted tradespeople near you, in seconds."
+PAGE_ICON = "🧰"
+ACCENT_COLOR = "#2563EB"
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Listing:
@@ -59,6 +77,10 @@ class Listing:
         return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# API key handling
+# ---------------------------------------------------------------------------
+
 def get_api_key() -> str | None:
     """Reads the API key from .env locally, or from Streamlit secrets when deployed."""
     key = os.environ.get("GOOGLE_PLACES_API_KEY")
@@ -70,7 +92,12 @@ def get_api_key() -> str | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Google Places API calls
+# ---------------------------------------------------------------------------
+
 def search_places(query: str, api_key: str, max_results: int) -> list[str]:
+    """Returns a list of place IDs matching the text query."""
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
@@ -95,6 +122,7 @@ def search_places(query: str, api_key: str, max_results: int) -> list[str]:
 
 
 def get_place_details(place_id: str, api_key: str) -> Listing | None:
+    """Fetches full details for a single place by ID."""
     headers = {
         "X-Goog-Api-Key": api_key,
         "X-Goog-FieldMask": DETAILS_FIELD_MASK,
@@ -124,6 +152,7 @@ def get_place_details(place_id: str, api_key: str) -> Listing | None:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_search(trade: str, location: str, max_results: int, api_key: str) -> list[Listing]:
+    """End-to-end search, cached for an hour so identical queries don't re-bill."""
     query = f"{trade} in {location}"
     place_ids = search_places(query, api_key, max_results)
 
@@ -134,6 +163,10 @@ def run_search(trade: str, location: str, max_results: int, api_key: str) -> lis
             listings.append(listing)
     return listings
 
+
+# ---------------------------------------------------------------------------
+# Export builders
+# ---------------------------------------------------------------------------
 
 def build_markdown(trade: str, location: str, listings: list[Listing]) -> str:
     if not listings:
@@ -159,7 +192,12 @@ def build_csv(listings: list[Listing]) -> str:
     return output.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
 def check_rate_limit() -> bool:
+    """Returns True if the user is still under this session's search limit."""
     if "search_count" not in st.session_state:
         st.session_state.search_count = 0
 
@@ -172,10 +210,118 @@ def check_rate_limit() -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# UI components
+# ---------------------------------------------------------------------------
+
+def render_header() -> None:
+    st.markdown(
+        f"<h1 style='margin-bottom: 0;'>Tradesman "
+        f"<span style='color: {ACCENT_COLOR};'>Finder</span></h1>",
+        unsafe_allow_html=True,
+    )
+    st.caption(APP_TAGLINE)
+    st.divider()
+
+
+def render_search_form() -> tuple[bool, str, str, int]:
+    """Renders the search form and returns (submitted, trade, location, max_results)."""
+    with st.form("search_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            trade = st.text_input("Trade", placeholder="e.g. plumber, carpenter, electrician").strip()
+        with col2:
+            location = st.text_input("Location", placeholder="e.g. Bolton, UK").strip()
+
+        max_results = st.slider("Max results", min_value=5, max_value=MAX_RESULTS_CAP, value=15)
+        submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
+
+    return submitted, trade, location, max_results
+
+
+def render_listing_card(listing: Listing, index: int) -> None:
+    with st.container(border=True):
+        header_col, rating_col = st.columns([4, 1])
+
+        with header_col:
+            st.markdown(f"**{index}. {listing.name}**")
+
+        with rating_col:
+            if listing.rating is not None:
+                review_text = f" ({listing.review_count})" if listing.review_count is not None else ""
+                st.markdown(
+                    f"<div style='text-align: right; color: {ACCENT_COLOR}; font-weight: 600;'>"
+                    f"★ {listing.rating}{review_text}</div>",
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown(f"📍 {listing.address}")
+        st.markdown(f"📞 {listing.phone}")
+
+        if listing.website:
+            st.markdown(f"🌐 [{listing.website}]({listing.website})")
+
+        if listing.maps_url:
+            st.markdown(f"[View on Google Maps →]({listing.maps_url})")
+
+
+def render_download_buttons(trade: str, location: str, listings: list[Listing]) -> None:
+    markdown = build_markdown(trade, location, listings)
+    csv_data = build_csv(listings)
+    safe_filename = f"{trade}_{location}".replace(" ", "_").replace(",", "")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.download_button(
+            "Download as Markdown",
+            data=markdown,
+            file_name=f"{safe_filename}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with col_b:
+        st.download_button(
+            "Download as CSV",
+            data=csv_data,
+            file_name=f"{safe_filename}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
+def render_results() -> None:
+    """Renders results from session state, independent of the Search button's click state."""
+    if "last_results" not in st.session_state:
+        return
+
+    listings = st.session_state.last_results
+    trade = st.session_state.last_trade
+    location = st.session_state.last_location
+
+    st.divider()
+
+    if not listings:
+        st.info("No results found. Try a different trade or location.")
+        return
+
+    st.subheader(f"{len(listings)} result{'s' if len(listings) != 1 else ''} found")
+
+    for i, listing in enumerate(listings, start=1):
+        render_listing_card(listing, i)
+
+    st.divider()
+    render_download_buttons(trade, location, listings)
+    st.caption("Data provided by Google")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
-    st.set_page_config(page_title="Tradesman Finder", page_icon="🔧")
-    st.title("🔧 Tradesman Finder")
-    st.write("Search for plumbers, carpenters, electricians and more near any location.")
+    st.set_page_config(page_title=APP_TITLE, page_icon=PAGE_ICON, layout="centered")
+
+    render_header()
 
     api_key = get_api_key()
     if not api_key:
@@ -185,15 +331,9 @@ def main():
         )
         st.stop()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        trade = st.text_input("Trade", placeholder="e.g. plumber, carpenter, electrician").strip()
-    with col2:
-        location = st.text_input("Location", placeholder="e.g. Bolton, UK").strip()
+    submitted, trade, location, max_results = render_search_form()
 
-    max_results = st.slider("Max results", min_value=5, max_value=MAX_RESULTS_CAP, value=15)
-
-    if st.button("Search", type="primary"):
+    if submitted:
         if not trade or not location:
             st.warning("Please enter both a trade and a location.")
         elif not check_rate_limit():
@@ -202,45 +342,11 @@ def main():
             with st.spinner(f"Searching for {trade} in {location}..."):
                 listings = run_search(trade, location, max_results, api_key)
             st.session_state.search_count += 1
-
-            # Store results in session state so they survive reruns triggered by download buttons
             st.session_state.last_results = listings
             st.session_state.last_trade = trade
             st.session_state.last_location = location
 
-    # Render results from session state, independent of the Search button's click state
-    if "last_results" in st.session_state:
-        listings = st.session_state.last_results
-        result_trade = st.session_state.last_trade
-        result_location = st.session_state.last_location
-
-        if not listings:
-            st.info("No results found. Try a different trade or location.")
-        else:
-            st.success(f"Found {len(listings)} result(s)")
-            markdown = build_markdown(result_trade, result_location, listings)
-            st.markdown(markdown)
-
-            safe_filename = f"{result_trade}_{result_location}".replace(" ", "_").replace(",", "")
-
-            col_a, col_b = st.columns(2)
-
-            with col_a:
-                st.download_button(
-                    "Download as Markdown",
-                    data=markdown,
-                    file_name=f"{safe_filename}.md",
-                    mime="text/markdown",
-                )
-
-            with col_b:
-                csv_data = build_csv(listings)
-                st.download_button(
-                    "Download as CSV",
-                    data=csv_data,
-                    file_name=f"{safe_filename}.csv",
-                    mime="text/csv",
-                )
+    render_results()
 
 
 if __name__ == "__main__":
